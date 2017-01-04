@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import javax.xml.bind.DatatypeConverter;
+
 import net.razorvine.serpent.ast.*;
 
 
@@ -102,16 +104,13 @@ public class Parser
 					}
 				}
 			case '(':
-				// tricky case here, it can be a tuple but also a complex number.
-				// try complex number first
+				// tricky case here, it can be a tuple but also a complex number:
+				// if the last character before the closing parenthesis is a 'j', it is a complex number
 				{
 					int bm = sr.bookmark();
-					try {
-						return parseComplex(sr);
-					} catch(ParseException x) {
-						sr.flipBack(bm);
-						return parseTuple(sr);
-					}
+					String betweenparens = sr.readUntil(")\n").trim();
+					sr.flipBack(bm);
+					return betweenparens.endsWith("j") ? parseComplex(sr) : parseTuple(sr);
 				}
 			default:
 				throw new ParseException("invalid sequencetype char");
@@ -434,14 +433,28 @@ public class Parser
 				numberstr = sr.read(1) + sr.readUntil("+-");
 			}
 			else
+			{
 				numberstr = sr.readUntil("+-");
+			}
+			sr.rewind(1); // rewind the +/-
+			
+			// because we're a bit more cautious here with reading chars than in the float parser,
+			// it can be that the parser now stopped directly after the 'e' in a number like "3.14e+20".
+			// ("3.14e20" is fine) So, check if the last char is 'e' and if so, continue reading 0..9.
+			if(numberstr.endsWith("e")||numberstr.endsWith("E")) {
+				// if the next symbol is + or -, accept it, then read the exponent integer
+				if(sr.peek()=='-' || sr.peek()=='+')
+					numberstr+=sr.read(1);
+				numberstr += sr.readWhile("0123456789");
+			}
+			
+			sr.skipWhitespace();
 			double real;
 			try {
 				real = Double.parseDouble(numberstr);
 			} catch (NumberFormatException x) {
 				throw new ParseException("invalid float format", x);
 			}
-			sr.rewind(1); // rewind the +/-
 			double imaginarypart = parseImaginaryPart(sr);
 			if(sr.read()!=')')
 				throw new ParseException("expected ) to end a complex number");
@@ -580,5 +593,31 @@ public class Parser
 		if(n.equals("Non"))
 			return NoneNode.Instance;
 		throw new ParseException("expected None");
+	}
+
+	/**
+	 * Utility function to convert obj back to actual bytes if it is a serpent-encoded bytes dictionary
+	 * (a IDictionary with base-64 encoded 'data' in it and 'encoding'='base64').
+	 * If obj is already a byte array, return obj unmodified.
+	 * If it is something else, throw an IllegalArgumentException
+	 */
+	public static byte[] toBytes(Object obj) {
+		if(obj instanceof Map<?,?>)
+		{
+			@SuppressWarnings("unchecked")
+			Map<String,String> dict = (Map<String,String>)obj;
+			String data = dict.get("data");
+			String encoding = dict.get("encoding");
+			if(data==null || encoding==null || !encoding.equals("base64"))
+			{
+				throw new IllegalArgumentException("argument is neither bytearray nor serpent base64 encoded bytes dict");
+			}
+			return DatatypeConverter.parseBase64Binary(data);
+		}
+		if(obj instanceof byte[])
+		{
+			return (byte[]) obj;
+		}
+		throw new IllegalArgumentException("argument is neither bytearray nor serpent base64 encoded bytes dict");
 	}
 }

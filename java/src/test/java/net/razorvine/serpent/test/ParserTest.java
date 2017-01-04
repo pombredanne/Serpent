@@ -24,6 +24,7 @@ import net.razorvine.serpent.ObjectifyVisitor;
 import net.razorvine.serpent.ParseException;
 import net.razorvine.serpent.Parser;
 import net.razorvine.serpent.SeekableStringReader;
+import net.razorvine.serpent.Serializer;
 import net.razorvine.serpent.ast.*;
 
 import org.junit.Ignore;
@@ -85,6 +86,7 @@ public class ParserTest
 		assertEquals(new DoubleNode(42.331), p.parse("42.331").root);
 		assertEquals(new DoubleNode(-42.331), p.parse("-42.331").root);
 		assertEquals(new DoubleNode(-1.2e19), p.parse("-1.2e+19").root);
+		assertEquals(new DoubleNode(-1.2e-19), p.parse("-1.2e-19").root);
 		assertEquals(new DoubleNode(0.0004), p.parse("4e-4").root);
 		assertEquals(new DoubleNode(40000), p.parse("4e4").root);
 		assertEquals(new BooleanNode(true), p.parse("True").root);
@@ -103,18 +105,54 @@ public class ParserTest
 	public void TestWeirdFloats()
 	{
 		Parser p = new Parser();
-		TupleNode tuple = (TupleNode) p.parse("(1e30000,-1e30000,(1e30000+3.4j),{'__class__':'float','value':'nan'})").root;
-		assertEquals(4, tuple.elements.size());
-		DoubleNode d = (DoubleNode) tuple.elements.get(0);
+		DoubleNode d = (DoubleNode) p.parse("1e30000").root;
+		assertTrue(Double.isInfinite(d.value));
+		assertTrue(d.value > 0.0);
+		d = (DoubleNode) p.parse("-1e30000").root;
+		assertTrue(Double.isInfinite(d.value));
+		assertTrue(d.value < 0.0);
+
+		TupleNode tuple = (TupleNode) p.parse("(1e30000,-1e30000,{'__class__':'float','value':'nan'})").root;
+		assertEquals(3, tuple.elements.size());
+		d = (DoubleNode) tuple.elements.get(0);
 		assertTrue(Double.isInfinite(d.value));
 		d = (DoubleNode) tuple.elements.get(1);
 		assertTrue(Double.isInfinite(d.value));
 		assertTrue(d.value < 0.0);
-		ComplexNumberNode c = (ComplexNumberNode) tuple.elements.get(2);
-		assertTrue(Double.isInfinite(c.real));
-		assertEquals(3.4,  c.imaginary, 0);
-		d = (DoubleNode) tuple.elements.get(3);
+		d = (DoubleNode) tuple.elements.get(2);
 		assertTrue(Double.isNaN(d.value));
+
+		ComplexNumberNode c = (ComplexNumberNode) p.parse("(1e30000-1e30000j)").root;
+		assertTrue(Double.isInfinite(c.real));
+		assertTrue(c.real>0.0);
+		assertTrue(Double.isInfinite(c.imaginary));
+		assertTrue(c.imaginary<0.0);
+	}
+	
+	@Test
+	public void TestFloatPrecision()
+	{
+		Parser p = new Parser();
+		Serializer serpent = new Serializer();
+		byte[] ser = serpent.serialize(1.2345678987654321);
+		DoubleNode dv = (DoubleNode) p.parse(ser).root;
+		assertEquals(new Double(1.2345678987654321), dv.value);
+		
+		ser = serpent.serialize(5555.12345678987656);
+		dv = (DoubleNode) p.parse(ser).root;
+		assertEquals(new Double(5555.12345678987656), dv.value);
+
+		ser = serpent.serialize(98765432123456.12345678987656);
+		dv = (DoubleNode) p.parse(ser).root;
+		assertEquals(new Double(98765432123456.12345678987656), dv.value);
+
+		ser = serpent.serialize(98765432123456.12345678987656e+44);
+		dv = (DoubleNode) p.parse(ser).root;
+		assertEquals(new Double(98765432123456.12345678987656e+44), dv.value);
+		
+		ser = serpent.serialize(-98765432123456.12345678987656e-44);
+		dv = (DoubleNode) p.parse(ser).root;
+		assertEquals(new Double(-98765432123456.12345678987656e-44), dv.value);
 	}
 	
 	@Test
@@ -427,6 +465,37 @@ public class ParserTest
 		assertEquals(cplx, p.parse("(2-3j)").root);
 		cplx.real = 0;
 		assertEquals(cplx, p.parse("-3j").root);
+		
+		cplx.real = -3.2e32;
+		cplx.imaginary = -9.9e44;
+		assertEquals(cplx, p.parse("(-3.2e32-9.9e44j)").root);
+		assertEquals(cplx, p.parse("(-3.2e+32-9.9e+44j)").root);
+		assertEquals(cplx, p.parse("(-3.2e32 -9.9e44j)").root);
+		assertEquals(cplx, p.parse("(-3.2e+32 -9.9e+44j)").root);
+		cplx.imaginary = 9.9e44;
+		assertEquals(cplx, p.parse("(-3.2e32+9.9e44j)").root);
+		assertEquals(cplx, p.parse("(-3.2e+32+9.9e+44j)").root);
+		cplx.real = -3.2e-32;
+		cplx.imaginary = -9.9e-44;
+		assertEquals(cplx, p.parse("(-3.2e-32-9.9e-44j)").root);		
+	}
+
+	@Test
+	public void TestComplexPrecision()
+	{
+		Parser p = new Parser();
+		ComplexNumberNode cv = (ComplexNumberNode)p.parse("(98765432123456.12345678987656+665544332211.9998877665544j)").root;
+		assertEquals(new Double(98765432123456.12345678987656), cv.real, 0);
+		assertEquals(new Double(665544332211.9998877665544), cv.imaginary, 0);
+		cv = (ComplexNumberNode)p.parse("(98765432123456.12345678987656-665544332211.9998877665544j)").root;
+		assertEquals(new Double(98765432123456.12345678987656), cv.real, 0);
+		assertEquals(new Double(-665544332211.9998877665544), cv.imaginary, 0);
+		cv = (ComplexNumberNode)p.parse("(98765432123456.12345678987656e+33+665544332211.9998877665544e+44j)").root;
+		assertEquals(new Double(98765432123456.12345678987656e+33), cv.real, 0);
+		assertEquals(new Double(665544332211.9998877665544e+44), cv.imaginary, 0);
+		cv = (ComplexNumberNode)p.parse("(-98765432123456.12345678987656e+33-665544332211.9998877665544e+44j)").root;
+		assertEquals(new Double(-98765432123456.12345678987656e+33), cv.real, 0);
+		assertEquals(new Double(-665544332211.9998877665544e+44), cv.imaginary, 0);
 	}
 	
 	@Test

@@ -2,11 +2,14 @@
 /// Serpent, a Python literal expression serializer/deserializer
 /// (a.k.a. Python's ast.literal_eval in .NET)
 ///
-/// Copyright 2014, Irmen de Jong (irmen@razorvine.net)
+/// Copyright Irmen de Jong (irmen@razorvine.net)
 /// Software license: "MIT software license". See http://opensource.org/licenses/MIT
 /// </summary>
 
 using System;
+#if !(SILVERLIGHT || WINDOWS_PHONE || PORTABLE)
+using System.Collections;
+#endif
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -24,7 +27,7 @@ namespace Razorvine.Serpent
 		/// </summary>
 		public Ast Parse(byte[] serialized)
 		{
-			return Parse(Encoding.UTF8.GetString(serialized));
+			return Parse(Encoding.UTF8.GetString(serialized, 0, serialized.Length));
 		}
 		
 		/// <summary>
@@ -94,16 +97,13 @@ namespace Razorvine.Serpent
 						}
 					}
 				case '(':
-					// tricky case here, it can be a tuple but also a complex number.
-					// try complex number first
+					// tricky case here, it can be a tuple but also a complex number:
+					// if the last character before the closing parenthesis is a 'j', it is a complex number
 					{
 						int bm = sr.Bookmark();
-						try {
-							return ParseComplex(sr);
-						} catch(ParseException) {
-							sr.FlipBack(bm);
-							return ParseTuple(sr);
-						}
+						string betweenparens = sr.ReadUntil(new char[]{')','\n'}).TrimEnd();
+						sr.FlipBack(bm);
+						return betweenparens.EndsWith("j") ? (Ast.INode) ParseComplex(sr) : ParseTuple(sr);
 					}
 				default:
 					throw new ParseException("invalid sequencetype char");
@@ -428,14 +428,28 @@ namespace Razorvine.Serpent
 					numberstr = sr.Read(1) + sr.ReadUntil(new char[] {'+', '-'});
 				}
 				else
+				{
 					numberstr = sr.ReadUntil(new char[] {'+', '-'});
+				}
+				sr.Rewind(1); // rewind the +/-
+				
+				// because we're a bit more cautious here with reading chars than in the float parser,
+				// it can be that the parser now stopped directly after the 'e' in a number like "3.14e+20".
+				// ("3.14e20" is fine) So, check if the last char is 'e' and if so, continue reading 0..9.
+				if(numberstr.EndsWith("e", StringComparison.InvariantCultureIgnoreCase)) {
+					// if the next symbol is + or -, accept it, then read the exponent integer
+					if(sr.Peek()=='-' || sr.Peek()=='+')
+						numberstr+=sr.Read(1);
+					numberstr += sr.ReadWhile("0123456789");
+				}
+
+				sr.SkipWhitespace();
 				double realpart;
 				try {
 					realpart = this.ParseDouble(numberstr);
 				} catch (FormatException x) {
 					throw new ParseException("invalid float format", x);
 				}
-				sr.Rewind(1); // rewind the +/-
 				double imaginarypart = ParseImaginaryPart(sr);
 				if(sr.Read()!=')')
 					throw new ParseException("expected ) to end a complex number");
@@ -506,7 +520,7 @@ namespace Razorvine.Serpent
 				char j_char = sr.Read();
 				if(j_char!='j')
 					throw new ParseException("not an imaginary part");
-			} catch (IndexOutOfRangeException x) {
+			} catch (IndexOutOfRangeException) {
 				throw new ParseException("not an imaginary part");
 			}
 			return double_value;
@@ -600,6 +614,66 @@ namespace Razorvine.Serpent
 			if(numberstr=="1e30000") return double.PositiveInfinity;
 			if(numberstr=="-1e30000") return double.NegativeInfinity;
 			return double.Parse(numberstr, CultureInfo.InvariantCulture);
+		}
+
+
+		/// <summary>
+    	/// Utility function to convert obj back to actual bytes if it is a serpent-encoded bytes dictionary
+    	/// (a IDictionary with base-64 encoded 'data' in it and 'encoding'='base64').
+    	/// If obj is already a byte array, return obj unmodified.
+    	/// If it is something else, throw an ArgumentException
+		/// </summary>
+		public static byte[] ToBytes(object obj) {
+#if !(SILVERLIGHT || WINDOWS_PHONE || PORTABLE)
+			Hashtable hashtable  = obj as Hashtable;
+			if(hashtable!=null)
+			{
+				string data = null;
+				string encoding = null;
+				if(hashtable.Contains("data")) data = (string)hashtable["data"];
+				if(hashtable.Contains("encoding")) encoding = (string)hashtable["encoding"];
+				if(data==null || "base64"!=encoding)
+				{
+					throw new ArgumentException("argument is neither bytearray nor serpent base64 encoded bytes dict");
+				}
+				return Convert.FromBase64String(data);
+			}
+#endif
+			
+			IDictionary<string,string> dict = obj as IDictionary<string,string>;
+			if(dict!=null)
+			{
+				string data;
+				string encoding;
+				bool hasData = dict.TryGetValue("data", out data);
+				bool hasEncoding = dict.TryGetValue("encoding", out encoding);
+				if(!hasData || !hasEncoding || encoding!="base64")
+				{
+					throw new ArgumentException("argument is neither bytearray nor serpent base64 encoded bytes dict");
+				}
+				return Convert.FromBase64String(data);
+			}
+			IDictionary<object,object> dict2 = obj as IDictionary<object,object>;
+			if(dict2!=null)
+			{
+				object dataobj;
+				object encodingobj;
+				bool hasData = dict2.TryGetValue("data", out dataobj);
+				bool hasEncoding = dict2.TryGetValue("encoding", out encodingobj);
+				string data = (string)dataobj;
+				string encoding = (string)encodingobj;
+				if(!hasData || !hasEncoding || encoding!="base64")
+				{
+					throw new ArgumentException("argument is neither bytearray nor serpent base64 encoded bytes dict");
+				}
+				return Convert.FromBase64String(data);
+			}			
+			byte[] bytearray = obj as byte[];
+			if(bytearray!=null)
+			{
+				return bytearray;
+			}
+			throw new ArgumentException("argument is neither bytearray nor serpent base64 encoded bytes dict");
 		}
 	}
 }

@@ -18,6 +18,7 @@ import traceback
 import threading
 import time
 import collections
+import types
 
 if sys.version_info < (2, 7):
     import unittest2 as unittest
@@ -48,14 +49,6 @@ class TestDeserialize(unittest.TestCase):
         encoded = repr(unicodestring).encode("utf-8")
         data = serpent.loads(encoded)
         self.assertEqual(unicodestring, data)
-
-    def test_weird_doubles(self):
-        values = [float('inf'), float('-inf'), float('nan')]
-        ser = serpent.dumps(values)
-        values2 = serpent.loads(ser)
-        self.assertEqual([float('inf'), float('-inf'), {'__class__':'float','value':'nan'}], values2)
-        values2 = serpent.loads(b"[1e30000,-1e30000]")
-        self.assertEqual([float('inf'), float('-inf')], values2)
 
     @unittest.skipIf(sys.version_info < (3, 0), "Python 2.x ast can't parse complex")
     def test_weird_complex(self):
@@ -96,7 +89,7 @@ class TestBasics(unittest.TestCase):
         else:
             self.assertTrue(type(ser) is bytes)
             header, _, rest = ser.partition(b"\n")
-        hdr = "# serpent utf-8 python2.6".encode("utf-8")
+        hdr = "# serpent utf-8 python2.6".encode("utf-8")    # don't change the 2.6 here even though we don't support python 2.6 any longer
         self.assertEqual(hdr, header)
 
     def test_comments(self):
@@ -313,6 +306,18 @@ class TestBasics(unittest.TestCase):
             self.assertEqual(ord("{"), data[0])
             self.assertEqual(ord("}"), data[-1])
 
+    def test_dict_iters(self):
+        data = {"john": 22, "sophie": 34, "bob": 26}
+        ser = serpent.loads(serpent.dumps(data.keys()))
+        self.assertIsInstance(ser, list)
+        self.assertEqual(["bob", "john", "sophie"], sorted(ser))
+        ser = serpent.loads(serpent.dumps(data.values()))
+        self.assertIsInstance(ser, list)
+        self.assertEqual([22, 26, 34], sorted(ser))
+        ser = serpent.loads(serpent.dumps(data.items()))
+        self.assertIsInstance(ser, list)
+        self.assertEqual([("bob", 26), ("john", 22), ("sophie", 34)], sorted(ser))
+
     def test_list(self):
         ser = serpent.dumps([])
         data = strip_header(ser)
@@ -496,6 +501,9 @@ class TestBasics(unittest.TestCase):
         ser = serpent.dumps(datetime.datetime(2013, 1, 20, 23, 59, 45, 999888))
         data = strip_header(ser)
         self.assertEqual(b"'2013-01-20T23:59:45.999888'", data)
+        ser = serpent.dumps(datetime.date(2013, 1, 20))
+        data = strip_header(ser)
+        self.assertEqual(b"'2013-01-20'", data)
         ser = serpent.dumps(datetime.time(23, 59, 45, 999888))
         data = strip_header(ser)
         self.assertEqual(b"'23:59:45.999888'", data)
@@ -534,10 +542,72 @@ class TestBasics(unittest.TestCase):
 
     def test_weird_floats(self):
         values = [float('inf'), float('-inf'), float('nan'), complex(float('inf'), 4)]
+        ser = serpent.dumps(values)
         ser = strip_header(serpent.dumps(values))
         self.assertEqual(b"[1e30000,-1e30000,{'__class__':'float','value':'nan'},(1e30000+4.0j)]", ser)
+        values2 = serpent.loads(ser)
+        self.assertEqual([float('inf'), float('-inf'), {'__class__':'float','value':'nan'}, (float('inf')+4j)], values2)
+        values2 = serpent.loads(b"[1e30000,-1e30000]")
+        self.assertEqual([float('inf'), float('-inf')], values2)
+
+    def test_float_precision(self):
+        # make sure we don't lose precision when converting floats (including scientific notation)
+        v = serpent.loads(serpent.dumps(1.2345678987654321))
+        self.assertEqual(1.2345678987654321, v)
+        v = serpent.loads(serpent.dumps(5555.12345678987656))
+        self.assertEqual(5555.12345678987656, v)
+        v = serpent.loads(serpent.dumps(98765432123456.12345678987656))
+        self.assertEqual(98765432123456.12345678987656, v)
+        v = serpent.loads(serpent.dumps(98765432123456.12345678987656e+44))
+        self.assertEqual(98765432123456.12345678987656e+44, v)
+        v = serpent.loads(serpent.dumps((98765432123456.12345678987656e+44+665544332211.9998877665544e+33j)))
+        self.assertEqual((98765432123456.12345678987656e+44+665544332211.9998877665544e+33j), v)
+        v = serpent.loads(serpent.dumps((-98765432123456.12345678987656e+44 -665544332211.9998877665544e+33j)))
+        self.assertEqual((-98765432123456.12345678987656e+44 -665544332211.9998877665544e+33j), v)
+
+    @unittest.skipIf(sys.version_info < (3, 4), "needs python 3.4 to test enum type")
+    def test_enums(self):
+        import enum
+        class Animal(enum.Enum):
+            BEE = 1
+            CAT = 2
+            DOG = 3
+        v = serpent.loads(serpent.dumps(Animal.CAT))
+        self.assertEqual(2, v)
+        Animal2 = enum.Enum("Animals2", "BEE CAT DOG HORSE RABBIT")
+        v = serpent.loads(serpent.dumps(Animal2.HORSE))
+        self.assertEqual(4, v)
+
+    def test_tobytes(self):
+        obj = b"test"
+        self.assertIs(obj, serpent.tobytes(obj))
+        obj = memoryview(b"test")
+        self.assertIs(obj, serpent.tobytes(obj))
+        obj = bytearray(b"test")
+        self.assertIs(obj, serpent.tobytes(obj))
+        if hasattr(types, "BufferType"):
+            obj = buffer(b"test")
+            self.assertIs(obj, serpent.tobytes(obj))
+        ser = {'data': 'dGVzdA==', 'encoding': 'base64'}
+        out = serpent.tobytes(ser)
+        self.assertEqual(b"test", out)
+        if sys.platform == 'cli':
+            self.assertIsInstance(out, str)  # ironpython base64 decodes into str type....
+        else:
+            self.assertIsInstance(out, bytes)
+        with self.assertRaises(TypeError):
+            serpent.tobytes({'@@@data': 'dGVzdA==', 'encoding': 'base64'})
+        with self.assertRaises(TypeError):
+            serpent.tobytes({'data': 'dGVzdA==', '@@@encoding': 'base64'})
+        with self.assertRaises(TypeError):
+            serpent.tobytes({'data': 'dGVzdA==', 'encoding': 'base99'})
+        with self.assertRaises(TypeError):
+            serpent.tobytes({})
+        with self.assertRaises(TypeError):
+            serpent.tobytes(42)
 
 
+@unittest.skip("no performance tests in default test suite")
 class TestSpeed(unittest.TestCase):
     def setUp(self):
         self.data = {
@@ -552,6 +622,7 @@ class TestSpeed(unittest.TestCase):
             "exc": ZeroDivisionError("fault"),
             "dates": [
                 datetime.datetime.now(),
+                datetime.date.today(),
                 datetime.time(23, 59, 45, 999888),
                 datetime.timedelta(seconds=500)
             ],
@@ -702,6 +773,11 @@ class Something(object):
     def __getstate__(self):
         return ("bogus", "state")
 
+class BaseClass(object):
+    pass
+class SubClass(BaseClass):
+    pass
+
 
 class TestCustomClasses(unittest.TestCase):
     def testCustomClass(self):
@@ -723,6 +799,16 @@ class TestCustomClasses(unittest.TestCase):
         d = serpent.dumps(s)
         x = serpent.loads(d)
         self.assertEqual(("bogus", "state"), x)
+
+    def testSubclass(self):
+        def custom_serializer(obj, serializer, stream, level):
+            serializer._serialize("[(sub)class=%s]" % type(obj), stream, level)
+        serpent.register_class(BaseClass, custom_serializer)
+        s = SubClass()
+        d = serpent.dumps(s)
+        x = serpent.loads(d)
+        classname = __name__+".SubClass"
+        self.assertEqual("[(sub)class=<class '"+classname+"'>]", x)
 
     def testUUID(self):
         uid = uuid.uuid4()

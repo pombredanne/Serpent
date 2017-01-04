@@ -2,14 +2,12 @@
 /// Serpent, a Python literal expression serializer/deserializer
 /// (a.k.a. Python's ast.literal_eval in .NET)
 ///
-/// Copyright 2014, Irmen de Jong (irmen@razorvine.net)
+/// Copyright Irmen de Jong (irmen@razorvine.net)
 /// Software license: "MIT software license". See http://opensource.org/licenses/MIT
 /// </summary>
 
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Runtime.Serialization;
 using System.Text;
 
 using NUnit.Framework;
@@ -164,9 +162,9 @@ namespace Razorvine.Serpent.Test
 	        data = strip_header(ser);
 	        Assert.AreEqual(B("(-2-3j)"), data);
 		}
-		
+				
 		[Test]
-		public void testDoubleNanInf()
+		public void TestDoubleNanInf()
 		{
 			Serializer serpent = new Serializer();
 			var doubles = new object[] {double.PositiveInfinity, double.NegativeInfinity, double.NaN,
@@ -318,6 +316,40 @@ namespace Razorvine.Serpent.Test
 			Parser p = new Parser();
 			string parsed = p.Parse(ser).Root.ToString();
             Assert.AreEqual(39, parsed.Length);
+
+            var hashtable = new Hashtable {
+            	{"data", "YWJjZGVm"},
+            	{"encoding", "base64"}
+            };
+            byte[] bytes2 = Parser.ToBytes(hashtable);
+            Assert.AreEqual(bytes, bytes2);
+
+            var dict = new Dictionary<string, string> {
+            	{"data", "YWJjZGVm"},
+            	{"encoding", "base64"}
+            };
+            bytes2 = Parser.ToBytes(dict);
+            Assert.AreEqual(bytes, bytes2);
+            
+            var dict2 = new Dictionary<object, object> {
+            	{"data", "YWJjZGVm"},
+            	{"encoding", "base64"}
+            };
+            bytes2 = Parser.ToBytes(dict2);
+            Assert.AreEqual(bytes, bytes2);
+
+            dict["encoding"] = "base99";
+            Assert.Throws<ArgumentException>(()=>Parser.ToBytes(dict));
+            dict.Clear();
+            Assert.Throws<ArgumentException>(()=>Parser.ToBytes(dict));
+            dict.Clear();
+            dict["data"] = "YWJjZGVm";
+            Assert.Throws<ArgumentException>(()=>Parser.ToBytes(dict));
+            dict.Clear();
+            dict["encoding"] = "base64";
+            Assert.Throws<ArgumentException>(()=>Parser.ToBytes(dict));
+            Assert.Throws<ArgumentException>(()=>Parser.ToBytes(12345));
+            Assert.Throws<ArgumentException>(()=>Parser.ToBytes(null));
 		}
 		
 		[Test]
@@ -438,10 +470,8 @@ namespace Razorvine.Serpent.Test
 		{
 			Serializer.RegisterClass(typeof(SerializeTestClass), null);
 			Serializer serpent = new Serializer(indent: true);
-			object obj = new UnserializableClass();
-			Assert.Throws<SerializationException>( ()=>serpent.Serialize(obj) );
 			
-			obj = new SerializeTestClass() {
+			var obj = new SerializeTestClass() {
 				i = 99,
 				s = "hi",
 				x = 42
@@ -494,8 +524,6 @@ namespace Razorvine.Serpent.Test
 		public void TestStruct()
 		{
 			Serializer serpent = new Serializer(indent: true);
-			UnserializableStruct obj;
-			Assert.Throws<SerializationException>( ()=>serpent.Serialize(obj) );
 			
 			var obj2 = new SerializeTestStruct() {
 				i = 99,
@@ -510,8 +538,6 @@ namespace Razorvine.Serpent.Test
 		public void TestStruct2()
 		{
 			Serializer serpent = new Serializer(indent: true, namespaceInClassName: true);
-			UnserializableStruct obj;
-			Assert.Throws<SerializationException>( ()=>serpent.Serialize(obj) );
 			
 			var obj2 = new SerializeTestStruct() {
 				i = 99,
@@ -611,9 +637,52 @@ namespace Razorvine.Serpent.Test
 			byte[] ser = strip_header(serpent.Serialize(e));
 			Assert.AreEqual("'Jarjar'", S(ser));
 		}
+
+		
+		interface IBaseInterface {};
+		interface ISubInterface : IBaseInterface {};
+		class BaseClassWithInterface : IBaseInterface {};
+		class SubClassWithInterface : BaseClassWithInterface, ISubInterface {};
+		class BaseClass {};
+		class SubClass : BaseClass {};
+		abstract class AbstractBaseClass {};
+		class ConcreteSubClass : AbstractBaseClass {};
+
+		protected IDictionary AnyClassSerializer(object arg)
+		{
+			IDictionary result = new Hashtable();
+			result["(SUB)CLASS"] = arg.GetType().Name;
+			return result;
+		}
+
+		[Test]
+		public void testAbstractBaseClassHierarchyPickler()
+		{
+			ConcreteSubClass c = new ConcreteSubClass();
+			Serializer serpent = new Serializer();
+			serpent.Serialize(c);
+			
+			Serializer.RegisterClass(typeof(AbstractBaseClass), AnyClassSerializer);
+			byte[] data = serpent.Serialize(c);
+			Assert.AreEqual("{'(SUB)CLASS':'ConcreteSubClass'}", S(strip_header(data)));
+		}
+		
+		[Test]
+		public void testInterfaceHierarchyPickler()
+		{
+			BaseClassWithInterface b = new BaseClassWithInterface();
+			SubClassWithInterface sub = new SubClassWithInterface();
+			Serializer serpent = new Serializer();
+			serpent.Serialize(b);
+			serpent.Serialize(sub);
+			Serializer.RegisterClass(typeof(IBaseInterface), AnyClassSerializer);
+			byte[] data = serpent.Serialize(b);
+			Assert.AreEqual("{'(SUB)CLASS':'BaseClassWithInterface'}", S(strip_header(data)));
+			data = serpent.Serialize(sub);
+			Assert.AreEqual("{'(SUB)CLASS':'SubClassWithInterface'}", S(strip_header(data)));
+		}			
 	}
 
-	[Serializable]
 	public class SerializeTestClass
 	{
 		public int x;
@@ -623,19 +692,10 @@ namespace Razorvine.Serpent.Test
 		
 	}
 	
-	[Serializable]
 	public struct SerializeTestStruct
 	{
 		public int x;
 		public string s {get; set;}
 		public int i {get; set;}
-	}
-
-	public class UnserializableClass
-	{
-	}
-	
-	public struct UnserializableStruct
-	{
 	}
 }

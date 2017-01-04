@@ -7,18 +7,20 @@ original object tree. As such it is safe to send serpent data to other
 machines over the network for instance (because only 'safe' literals are
 encoded).
 
-Compatible with Python 2.6+ (including 3.x), IronPython 2.7+, Jython 2.7+.
+Compatible with Python 2.7+ (including 3.x), IronPython 2.7+, Jython 2.7+.
 
 Serpent handles several special Python types to make life easier:
 
  - str  --> promoted to unicode (see below why this is)
  - bytes, bytearrays, memoryview, buffer  --> string, base-64
    (you'll have to manually un-base64 them though)
- - uuid.UUID, datetime.{datetime, time, timespan}  --> appropriate string/number
+ - uuid.UUID, datetime.{datetime, date, time, timespan}  --> appropriate string/number
  - decimal.Decimal  --> string (to not lose precision)
  - array.array typecode 'c'/'u' --> string/unicode
  - array.array other typecode --> list
  - Exception  --> dict with some fields of the exception (message, args)
+ - collections module types  --> mostly equivalent primitive types or dict
+ - enums --> the value of the enum (Python 3.4+)
  - all other types  --> dict with  __getstate__  or vars() of the object
 
 Notes:
@@ -31,9 +33,6 @@ output doesn't have those problematic 'u' prefixes on strings.
 The serializer is not thread-safe. Make sure you're not making changes
 to the object tree that is being serialized, and don't use the same
 serializer in different threads.
-
-Python 2.6 cannot deserialize complex numbers (limitation of
-ast.literal_eval in 2.6)
 
 Because the serialized format is just valid Python source code, it can
 contain comments.
@@ -48,7 +47,7 @@ and is represented by the special value:  {'__class__':'float','value':'nan'}
 We chose not to encode it as just the string 'NaN' because that could cause
 memory issues when used in multiplications.
 
-Copyright 2013, 2014 by Irmen de Jong (irmen@razorvine.net)
+Copyright by Irmen de Jong (irmen@razorvine.net)
 Software license: "MIT software license". See http://opensource.org/licenses/MIT
 """
 
@@ -67,8 +66,8 @@ import uuid
 import array
 import math
 
-__version__ = "1.11"
-__all__ = ["dump", "dumps", "load", "loads", "register_class", "unregister_class", "fix_nan"]
+__version__ = "1.16"
+__all__ = ["dump", "dumps", "load", "loads", "register_class", "unregister_class", "tobytes"]
 
 can_use_set_literals = sys.version_info >= (3, 2)  # check if we can use set literals
 
@@ -118,9 +117,22 @@ def _ser_OrderedDict(obj, serializer, outputstream, indentlevel):
     serializer._serialize(obj, outputstream, indentlevel)
 
 
-_special_classes_registry = {}
+def _ser_DictView(obj, serializer, outputstream, indentlevel):
+    serializer.ser_builtins_list(obj, outputstream, indentlevel)
+
+
+_special_classes_registry = {
+    collections.KeysView: _ser_DictView,
+    collections.ValuesView: _ser_DictView,
+    collections.ItemsView: _ser_DictView
+}
 if sys.version_info >= (2, 7):
     _special_classes_registry[collections.OrderedDict] = _ser_OrderedDict
+if sys.version_info >= (3, 4):
+    import enum
+    def _ser_Enum(obj, serializer, outputstream, indentlevel):
+        serializer._serialize(obj.value, outputstream, indentlevel)
+    _special_classes_registry[enum.Enum] = _ser_Enum
 
 
 def unregister_class(clazz):
@@ -139,7 +151,10 @@ def register_class(clazz, serializer):
 
 
 class BytesWrapper(object):
-    """Wrapper for bytes, bytearray etc. to make them appear as base-64 encoded data."""
+    """
+    Wrapper for bytes, bytearray etc. to make them appear as base-64 encoded data.
+    You can use the tobytes utility function to decode this back into the actual bytes (or do it manually)
+    """
     def __init__(self, data):
         self.data = data
 
@@ -193,23 +208,41 @@ _translate_types = {
 }
 
 if sys.version_info >= (3, 0):
-   _translate_types.update({
-       collections.UserDict: dict,
-       collections.UserList: list,
-       collections.UserString: str
-   })
+    _translate_types.update({
+        collections.UserDict: dict,
+        collections.UserList: list,
+        collections.UserString: str
+    })
+
+_bytes_types = [bytes, bytearray, memoryview]
 
 # do some dynamic changes to the types configuration if needed
 if bytes is str:
     del _translate_types[bytes]
 if hasattr(types, "BufferType"):
     _translate_types[types.BufferType] = BytesWrapper.from_buffer
+    _bytes_types.append(buffer)
 try:
     _translate_types[memoryview] = BytesWrapper.from_memoryview
 except NameError:
     pass
 if sys.platform == "cli":
     _repr_types.remove(str)  # IronPython needs special str treatment, otherwise it treats unicode wrong
+_bytes_types = tuple(_bytes_types)
+
+
+def tobytes(obj):
+    """
+    Utility function to convert obj back to actual bytes if it is a serpent-encoded bytes dictionary
+    (a dict with base-64 encoded 'data' in it and 'encoding'='base64').
+    If obj is already bytes or a byte-like type, return obj unmodified.
+    Will raise TypeError if obj is none of the above.
+    """
+    if isinstance(obj, _bytes_types):
+        return obj
+    if isinstance(obj, dict) and "data" in obj and obj.get("encoding") == "base64":
+        return base64.b64decode(obj["data"])
+    raise TypeError("argument is neither bytes nor serpent base64 encoded bytes dict")
 
 
 class Serializer(object):
@@ -241,7 +274,7 @@ class Serializer(object):
         if self.set_literals:
             header += "python3.2\n"   # set-literals require python 3.2+ to deserialize (ast.literal_eval limitation)
         else:
-            header += "python2.6\n"
+            header += "python2.6\n"   # don't change this even though we don't support 2.6 any longer, otherwise we can't read older serpent strings
         out = [header.encode("utf-8")]
         try:
             if os.name != "java" and sys.platform != "cli":
@@ -275,20 +308,19 @@ class Serializer(object):
             if isinstance(obj, clazz):
                 special_classes[clazz](obj, self, out, level)
                 return
-        else:
-            # serialize dispatch
-            try:
-                f = self.dispatch[t]
-            except KeyError:
-                # walk the MRO until we find a base class we recognise
-                for type_ in t.__mro__:
-                    if type_ in self.dispatch:
-                        f = self.dispatch[type_]
-                        break
-                else:
-                    # fall back to the default class serializer
-                    f = Serializer.ser_default_class
-            f(self, obj, out, level)
+        # serialize dispatch
+        try:
+            func = self.dispatch[t]
+        except KeyError:
+            # walk the MRO until we find a base class we recognise
+            for type_ in t.__mro__:
+                if type_ in self.dispatch:
+                    func = self.dispatch[type_]
+                    break
+            else:
+                # fall back to the default class serializer
+                func = Serializer.ser_default_class
+        func(self, obj, out, level)
 
     def ser_builtins_str(self, str_obj, out, level):
         # special case str, for IronPython where str==unicode and repr() yields undesired result
@@ -306,7 +338,7 @@ class Serializer(object):
             else:
                 out.append(b"-1e30000")
         else:
-            out.append(str(float_obj).encode("ascii"))
+            out.append(repr(float_obj).encode("ascii"))
     dispatch[float] = ser_builtins_float
 
     def ser_builtins_complex(self, complex_obj, out, level):
@@ -415,20 +447,20 @@ class Serializer(object):
                 sorted_items = sorted(dict_items)
             except TypeError:  # can occur when elements can't be ordered (Python 3.x)
                 sorted_items = dict_items
-            for k, v in sorted_items:
+            for key, value in sorted_items:
                 append(indent_chars_inside)
-                serialize(k, out, level + 1)
+                serialize(key, out, level + 1)
                 append(b": ")
-                serialize(v, out, level + 1)
+                serialize(value, out, level + 1)
                 append(b",\n")
             del out[-1]  # remove last ,\n
             append(b"\n" + indent_chars + b"}")
         else:
             append(b"{")
-            for k, v in dict_obj.items():
-                serialize(k, out, level + 1)
+            for key, value in dict_obj.items():
+                serialize(key, out, level + 1)
                 append(b":")
-                serialize(v, out, level + 1)
+                serialize(value, out, level + 1)
                 append(b",")
             if dict_obj:
                 del out[-1]  # remove the last ,
@@ -482,7 +514,11 @@ class Serializer(object):
     def ser_datetime_datetime(self, datetime_obj, out, level):
         self._serialize(datetime_obj.isoformat(), out, level)
     dispatch[datetime.datetime] = ser_datetime_datetime
-
+    
+    def ser_datetime_date(self, date_obj, out, level):
+        self._serialize(date_obj.isoformat(), out, level)
+    dispatch[datetime.date] = ser_datetime_date
+    
     if os.name == "java" or sys.version_info < (2, 7):    # jython bug http://bugs.jython.org/issue2010
         def ser_datetime_timedelta(self, timedelta_obj, out, level):
             secs = ((timedelta_obj.days * 86400 + timedelta_obj.seconds) * 10 ** 6 + timedelta_obj.microseconds) / 10 ** 6

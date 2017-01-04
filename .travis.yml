@@ -1,0 +1,18 @@
+language: python
+python:
+  - "2.7"
+  - "3.3"
+  - "3.4"
+  - "3.5"
+  - "3.6"
+  - "pypy"
+
+# Use fast travis build infrastructure explicitly
+sudo: false
+
+# Installation installs dependencies
+install:
+  - pip install pytz
+  - pip install .
+
+script: python -bb test_serpent.py

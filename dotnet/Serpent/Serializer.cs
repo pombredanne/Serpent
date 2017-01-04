@@ -2,7 +2,7 @@
 /// Serpent, a Python literal expression serializer/deserializer
 /// (a.k.a. Python's ast.literal_eval in .NET)
 ///
-/// Copyright 2014, Irmen de Jong (irmen@razorvine.net)
+/// Copyright Irmen de Jong (irmen@razorvine.net)
 /// Software license: "MIT software license". See http://opensource.org/licenses/MIT
 /// </summary>
 
@@ -112,8 +112,8 @@ namespace Razorvine.Serpent
 			else if(t.IsGenericType && t.GetGenericTypeDefinition().Equals(typeof(HashSet<>)))
 			{
 				IEnumerable x = (IEnumerable) obj;
-				ArrayList list = new ArrayList();
-				foreach(var elt in x)
+				List<object> list = new List<object>();
+				foreach(object elt in x)
 					list.Add(elt);
 				object[] setvalues = list.ToArray();
 				Serialize_set(setvalues, tw, level);
@@ -314,7 +314,7 @@ namespace Razorvine.Serpent
 		{
 			// base-64 struct output
 			string str = Convert.ToBase64String(data);
-			var dict = new Hashtable() {
+			var dict = new Dictionary<string,string>() {
 				{"data", str},	
 				{"encoding", "base64"}
 			};
@@ -346,7 +346,7 @@ namespace Razorvine.Serpent
 
 		protected void Serialize_datetime(DateTime dt, TextWriter tw, int level)
 		{
-			string s = XmlConvert.ToString(dt, XmlDateTimeSerializationMode.Unspecified);
+			string s = dt.Millisecond == 0 ? XmlConvert.ToString(dt, "yyyy-MM-ddTHH:mm:ss") : XmlConvert.ToString(dt, "yyyy-MM-ddTHH:mm:ss.fff");
 			Serialize_string(s, tw, level);
 		}
 
@@ -379,7 +379,7 @@ namespace Razorvine.Serpent
 					className = exc.GetType().FullName;
 				else
 					className = exc.GetType().Name;
-				dict = new Hashtable() {
+				dict = new Dictionary<string, object> {
 					{"__class__", className},
 					{"__exception__", true},
 					{"args", new string[]{exc.Message} },
@@ -446,8 +446,7 @@ namespace Razorvine.Serpent
 			Type obj_type = obj.GetType();
 			
 			IDictionary dict;
-			Func<object, IDictionary> converter = null;
-			classToDictRegistry.TryGetValue(obj_type, out converter);
+			Func<object, IDictionary> converter = GetCustomConverter(obj_type);
 			
 			if(converter!=null)
 			{
@@ -456,15 +455,8 @@ namespace Razorvine.Serpent
 			}
 			else
 			{
-				// if it is an anonymous class type, accept it.
-				// any other class needs to have [Serializable] attribute
 				bool isAnonymousClass = obj_type.Name.StartsWith("<>");
-				if(!isAnonymousClass && !obj_type.IsSerializable)
-				{
-					throw new SerializationException("object of type "+obj_type.Name+" is not serializable");
-				}
-				
-				dict = new Hashtable();
+				dict = new Dictionary<string,object>();
 				if(!isAnonymousClass) {
 					// only provide the class name when it is not an anonymous class
 					if(this.NamespaceInClassName)
@@ -486,6 +478,23 @@ namespace Razorvine.Serpent
 			}
 			
 			Serialize_dict(dict, tw, level);
+		}
+
+		protected Func<object, IDictionary> GetCustomConverter(Type obj_type)
+		{
+			Func<object, IDictionary> converter;
+			if(classToDictRegistry.TryGetValue(obj_type, out converter))
+				return converter;  // exact match
+			
+			// check if there's a custom converter registered for an interface or abstract base class
+			// that this object implements or inherits from.
+			foreach(var x in classToDictRegistry) {
+				if(x.Key.IsAssignableFrom(obj_type)) {
+					return x.Value;
+				}
+			}
+			
+			return null;
 		}
 	}
 }

@@ -2,7 +2,7 @@
 /// Serpent, a Python literal expression serializer/deserializer
 /// (a.k.a. Python's ast.literal_eval in .NET)
 ///
-/// Copyright 2014, Irmen de Jong (irmen@razorvine.net)
+/// Copyright Irmen de Jong (irmen@razorvine.net)
 /// Software license: "MIT software license". See http://opensource.org/licenses/MIT
 /// </summary>
 
@@ -11,8 +11,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
-using System.Xml.Serialization;
-
 using NUnit.Framework;
 
 namespace Razorvine.Serpent.Test
@@ -61,6 +59,7 @@ namespace Razorvine.Serpent.Test
 			Assert.AreEqual(new Ast.DoubleNode(42.331), p.Parse("42.331").Root);
 			Assert.AreEqual(new Ast.DoubleNode(-42.331), p.Parse("-42.331").Root);
 			Assert.AreEqual(new Ast.DoubleNode(-1.2e19), p.Parse("-1.2e+19").Root);
+			Assert.AreEqual(new Ast.DoubleNode(-1.2e19), p.Parse("-1.2e19").Root);
 			Assert.AreEqual(new Ast.DoubleNode(0.0004), p.Parse("4e-4").Root);
 			Assert.AreEqual(new Ast.DoubleNode(40000), p.Parse("4e4").Root);
 			Assert.AreEqual(new Ast.BooleanNode(true), p.Parse("True").Root);
@@ -78,19 +77,51 @@ namespace Razorvine.Serpent.Test
 		public void TestWeirdFloats()
 		{
 			Parser p = new Parser();
-			var tuple = (Ast.TupleNode) p.Parse("(1e30000,-1e30000,(1e30000+3.4j),{'__class__':'float','value':'nan'})").Root;
-			Assert.AreEqual(4, tuple.Elements.Count);
-			var d = (Ast.DoubleNode) tuple.Elements[0];
+			var d = (Ast.DoubleNode) p.Parse("1e30000").Root;
+			Assert.IsTrue(double.IsPositiveInfinity(d.Value));
+			d = (Ast.DoubleNode) p.Parse("-1e30000").Root;
+			Assert.IsTrue(double.IsNegativeInfinity(d.Value));
+			
+			var tuple = (Ast.TupleNode) p.Parse("(1e30000,-1e30000,{'__class__':'float','value':'nan'})").Root;
+			Assert.AreEqual(3, tuple.Elements.Count);
+			d = (Ast.DoubleNode) tuple.Elements[0];
 			Assert.IsTrue(double.IsPositiveInfinity(d.Value));
 			d = (Ast.DoubleNode) tuple.Elements[1];
 			Assert.IsTrue(double.IsNegativeInfinity(d.Value));
-			var c = (Ast.ComplexNumberNode) tuple.Elements[2];
-			Assert.IsTrue(double.IsInfinity(c.Real));
-			Assert.AreEqual(3.4,  c.Imaginary, 0);
-			d = (Ast.DoubleNode) tuple.Elements[3];
+			d = (Ast.DoubleNode) tuple.Elements[2];
 			Assert.IsTrue(Double.IsNaN(d.Value));
+			
+			var c = (Ast.ComplexNumberNode) p.Parse("(1e30000-1e30000j)").Root;
+			Assert.IsTrue(double.IsPositiveInfinity(c.Real));
+			Assert.IsTrue(double.IsNegativeInfinity(c.Imaginary));
 		}
 
+		[Test]
+		public void TestFloatPrecision()
+		{
+			Parser p = new Parser();
+			Serializer serpent = new Serializer();
+			var ser = serpent.Serialize(1.2345678987654321);
+			Ast.DoubleNode dv = (Ast.DoubleNode) p.Parse(ser).Root;
+			Assert.AreEqual(1.2345678987654321.ToString(), dv.Value.ToString());
+			
+			ser = serpent.Serialize(5555.12345678987656);
+			dv = (Ast.DoubleNode) p.Parse(ser).Root;
+			Assert.AreEqual(5555.12345678987656.ToString(), dv.Value.ToString());
+
+			ser = serpent.Serialize(98765432123456.12345678987656);
+			dv = (Ast.DoubleNode) p.Parse(ser).Root;
+			Assert.AreEqual(98765432123456.12345678987656.ToString(), dv.Value.ToString());
+
+			ser = serpent.Serialize(98765432123456.12345678987656e+44);
+			dv = (Ast.DoubleNode) p.Parse(ser).Root;
+			Assert.AreEqual((98765432123456.12345678987656e+44).ToString(), dv.Value.ToString());
+			
+			ser = serpent.Serialize(-98765432123456.12345678987656e-44);
+			dv = (Ast.DoubleNode) p.Parse(ser).Root;
+			Assert.AreEqual((-98765432123456.12345678987656e-44).ToString(), dv.Value.ToString());
+		}
+		
 		[Test]
 		public void TestEquality()
 		{
@@ -398,8 +429,39 @@ namespace Razorvine.Serpent.Test
 			Assert.AreEqual(cplx, p.Parse("(2-3j)").Root);
 			cplx.Real = 0;
 			Assert.AreEqual(cplx, p.Parse("-3j").Root);
+			
+			cplx.Real = -3.2e32;
+			cplx.Imaginary = -9.9e44;
+			Assert.AreEqual(cplx, p.Parse("(-3.2e32 -9.9e44j)").Root);
+			Assert.AreEqual(cplx, p.Parse("(-3.2e+32 -9.9e+44j)").Root);
+			Assert.AreEqual(cplx, p.Parse("(-3.2e32-9.9e44j)").Root);
+			Assert.AreEqual(cplx, p.Parse("(-3.2e+32-9.9e+44j)").Root);
+			cplx.Imaginary = 9.9e44;
+			Assert.AreEqual(cplx, p.Parse("(-3.2e32+9.9e44j)").Root);
+			Assert.AreEqual(cplx, p.Parse("(-3.2e+32+9.9e+44j)").Root);
+			cplx.Real = -3.2e-32;
+			cplx.Imaginary = -9.9e-44;
+			Assert.AreEqual(cplx, p.Parse("(-3.2e-32-9.9e-44j)").Root);
 		}
 		
+		[Test]
+		public void TestComplexPrecision()
+		{
+			Parser p = new Parser();
+			Ast.ComplexNumberNode cv = (Ast.ComplexNumberNode)p.Parse("(98765432123456.12345678987656+665544332211.9998877665544j)").Root;
+			Assert.AreEqual(98765432123456.12345678987656, cv.Real);
+			Assert.AreEqual(665544332211.9998877665544, cv.Imaginary);
+			cv = (Ast.ComplexNumberNode)p.Parse("(98765432123456.12345678987656-665544332211.9998877665544j)").Root;
+			Assert.AreEqual(98765432123456.12345678987656, cv.Real);
+			Assert.AreEqual(-665544332211.9998877665544, cv.Imaginary);
+			cv = (Ast.ComplexNumberNode)p.Parse("(98765432123456.12345678987656e+33+665544332211.9998877665544e+44j)").Root;
+			Assert.AreEqual(98765432123456.12345678987656e+33, cv.Real);
+			Assert.AreEqual(665544332211.9998877665544e+44, cv.Imaginary);
+			cv = (Ast.ComplexNumberNode)p.Parse("(-98765432123456.12345678987656e+33-665544332211.9998877665544e+44j)").Root;
+			Assert.AreEqual(-98765432123456.12345678987656e+33, cv.Real);
+			Assert.AreEqual(-665544332211.9998877665544e+44, cv.Imaginary);
+		}
+
 		[Test]
 		public void TestPrimitivesStuffAtEnd()
 		{
